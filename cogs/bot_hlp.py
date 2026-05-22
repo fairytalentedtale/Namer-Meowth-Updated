@@ -14,7 +14,7 @@ class Help(commands.Cog):
     async def help_command(self, ctx, category: str = None):
         """Show help information
 
-        Categories: collection, category, hunt, pings, settings, prediction, starboard, helpful, incense, captcha, reserve, channels, owner, all
+        Categories: collection, category, hunt, pings, settings, prediction, starboard, helpful, incense, captcha, reserve, channels, listgen, owner, all
         """
         prefix = BOT_PREFIX[0]
         is_owner = await self.bot.is_owner(ctx.author)
@@ -37,6 +37,7 @@ class Help(commands.Cog):
             embed.add_field(name="🔥 Incense",          value=f"`{prefix}help incense` — Manage Poketwo incense sessions",                 inline=False)
             embed.add_field(name="🔐 Captcha",          value=f"`{prefix}help captcha` — Captcha alert information",                       inline=False)
             embed.add_field(name="💾 Reserve",          value=f"`{prefix}help reserve` — Server-specific Pokémon reservation system",      inline=False)
+            embed.add_field(name="📝 List Builder",      value=f"`{prefix}help listgen` — Build and export Pokémon name lists",              inline=False)
             if is_owner:
                 embed.add_field(name="👑 Owner",        value=f"`{prefix}help owner` — Bot owner commands",                               inline=False)
             embed.add_field(name="ℹ️ About",            value=f"`{prefix}about` — Bot information and stats",                             inline=False)
@@ -467,10 +468,10 @@ class Help(commands.Cog):
             embed.add_field(
                 name=f"`{prefix}timedifference` / `{prefix}timediff` / `{prefix}td`",
                 value=(
-                    "Find the time difference between two messages in seconds and milliseconds\n"
-                    f"• Reply to a message + `{prefix}td` — compares it with the message above it\n"
-                    f"• `{prefix}td <id>` — compares that message with the one above it\n"
-                    f"• `{prefix}td <id1> <id2>` — compares two messages directly\n"
+                    "Find time between messages, show message date, or compare IDs (instant)\n"
+                    f"• `{prefix}td` (reply) — show full details of message + one before it\n"
+                    f"• `{prefix}td <id>` — show just the date of that message (instant)\n"
+                    f"• `{prefix}td <id1> <id2>` — show time difference only (instant, works cross-server)\n"
                     "Also available as `/timedifference`"
                 ),
                 inline=False,
@@ -482,6 +483,17 @@ class Help(commands.Cog):
                     f"• Reply to a Pokétwo `p!info` embed + `{prefix}date` — reads ObjectID from footer automatically\n"
                     f"• `{prefix}date <objectid>` — provide the ObjectID directly\n"
                     "Also available as `/date` and the **Get Caught Date** right-click context menu"
+                ),
+                inline=False,
+            )
+            embed.add_field(
+                name=f"`{prefix}color <color>` / `{prefix}c`",
+                value=(
+                    "Convert and display color in multiple formats\n"
+                    f"• `{prefix}color #FF0000` — hex format\n"
+                    f"• `{prefix}color 255, 0, 0` — RGB format\n"
+                    f"• `{prefix}color red` — color name (red, blue, green, etc.)\n"
+                    "Shows: hex, RGB, HSL, decimal, and visual preview"
                 ),
                 inline=False,
             )
@@ -668,6 +680,73 @@ class Help(commands.Cog):
             )
 
         # ── All commands ──────────────────────────────────────────────
+        elif category in ["listgen", "lg", "listbuilder", "list", "listbuilder"]:
+            embed = discord.Embed(
+                title="📝 List Builder",
+                description=(
+                    "Build, filter, and export Pokémon name lists with a button-driven UI.\n"
+                    f"Start with `{prefix}listgen` (or `{prefix}lg` / `{prefix}listbuilder`).\n"
+                    f"Reply to a message containing Pokémon names to extract them automatically — "
+                    "the bot will watch that message for edits for 2 minutes."
+                ),
+                color=EMBED_COLOR,
+            )
+            embed.add_field(
+                name="🚀 Command",
+                value=(
+                    f"`{prefix}listgen` — open an empty list builder\n"
+                    f"`{prefix}listgen` *(as a reply)* — extract names from the replied message"
+                ),
+                inline=False,
+            )
+            embed.add_field(
+                name="🔘 Buttons",
+                value=(
+                    "**➕ Add** — open a modal with up to 3 filter inputs\n"
+                    "**➖ Remove** — remove names matching a filter\n"
+                    "**🗑 Clear** — wipe the entire list\n"
+                    "**📋 Format & Display** — choose output format, case, language, and sort order\n"
+                    "**⚙️ Advanced Options** — set enclosure, find & replace, toggle event Pokémon\n"
+                    "**📤 Send** — post the finished list (auto-paginates if too long)"
+                ),
+                inline=False,
+            )
+            embed.add_field(
+                name="🔍 Filter Syntax",
+                value=(
+                    f"`--type <type>` / `--t <type>` — filter by type\n"
+                    f"`--region <region>` / `--r <region>` — filter by region\n"
+                    f"`--sr <denom>` / `--spawnrate <denom>` — filter by spawn-rate denominator *(e.g. `--sr 225`)*\n"
+                    f"`--stage <1|2|3>` — filter by evolution stage\n"
+                    f"`--name <name>` / `--n <name>` — exact name match; prefix `all` for all forms *(e.g. `--n all furfrou`)*\n"
+                    f"`--catchable` — only Pokémon with a spawn-rate entry\n"
+                    f"`--notcatchable` — only Pokémon **without** a spawn-rate entry\n"
+                    "Filters in a single cell are combined with AND logic. "
+                    "Multiple modal cells are combined with OR logic."
+                ),
+                inline=False,
+            )
+            embed.add_field(
+                name="📋 Format Options",
+                value=(
+                    "**Comma separated** — `Bulbasaur, Ivysaur, Venusaur`\n"
+                    "**--n format** — `Bulbasaur --n Ivysaur --n Venusaur`\n"
+                    "**--evo format** — `Bulbasaur --evo Ivysaur --evo Venusaur`\n"
+                    "**One per line** — one name per line (supports bullet prefix)"
+                ),
+                inline=False,
+            )
+            embed.add_field(
+                name="🌍 Language Options",
+                value="English 🇬🇧 • German 🇩🇪 • French 🇫🇷 • Japanese 🇯🇵 • Best Name ⭐",
+                inline=False,
+            )
+            embed.add_field(
+                name="⏱️ Timeout",
+                value="The UI closes automatically after **2 minutes of inactivity**.",
+                inline=False,
+            )
+
         elif category in ["all", "commands"]:
             embed = discord.Embed(
                 title="📚 All Commands",
@@ -722,7 +801,8 @@ class Help(commands.Cog):
                 name="🔍 Helpful",
                 value=(
                     f"`{prefix}sr <pokemon>` • `{prefix}shr [chain] [target%]`\n"
-                    f"`{prefix}td` • `{prefix}td <id>` • `{prefix}td <id1> <id2>` — time difference between messages\n"
+                    f"`{prefix}td [id] [id2]` — show date, time diff, or full details (reply)\n"
+                    f"`{prefix}color <hex/rgb/name>` — convert and display color formats\n"
                     f"`{prefix}date [objectid]` / `{prefix}caught` — Pokémon caught date from ObjectID  •  **Right-click:** Get Caught Date\n"
                     f"`{prefix}extractids [msg_id]` / `{prefix}eids` — extract IDs from Pokétwo embed  •  **Right-click:** Extract IDs\n"
                     "Hint solver (automatic — no command needed)"
@@ -753,6 +833,14 @@ class Help(commands.Cog):
                 inline=False,
             )
             embed.add_field(
+                name="📝 List Builder",
+                value=(
+                    f"`{prefix}listgen` / `{prefix}lg` / `{prefix}listbuilder`\n"
+                    f"Filters: `--type` `--region` `--sr` `--stage` `--name` `--catchable` `--notcatchable`"
+                ),
+                inline=False,
+            )
+            embed.add_field(
                 name="🔍 Starboard Manual Check  *(Admin)*",
                 value=f"`{prefix}catchcheck` • `{prefix}eggcheck` • `{prefix}unboxcheck`",
                 inline=False,
@@ -774,7 +862,7 @@ class Help(commands.Cog):
             await ctx.reply(
                 f"❌ Unknown category: `{category}`\n"
                 f"Available: `collection`, `category`, `hunt`, `pings`, `settings`, `roles`, `channels`, "
-                f"`prediction`, `starboard`, `helpful`, `incense`, `captcha`, `reserve`, "
+                f"`prediction`, `starboard`, `helpful`, `incense`, `captcha`, `reserve`, `listgen`, "
                 f"{'`owner`, ' if is_owner else ''}`all`\n"
                 f"Use `{prefix}help` to see the main help menu.",
                 mention_author=False,
@@ -871,7 +959,7 @@ class Help(commands.Cog):
     # Slash Commands
     # ------------------------------------------------------------------
     @app_commands.command(name="help", description="Show help information for the bot")
-    @app_commands.describe(category="Category: collection, category, hunt, pings, settings, roles, channels, prediction, starboard, helpful, incense, captcha, reserve, all")
+    @app_commands.describe(category="Category: collection, category, hunt, pings, settings, roles, channels, prediction, starboard, helpful, incense, captcha, reserve, listgen, all")
     async def slash_help(self, interaction: discord.Interaction, category: str = None):
         ctx = await commands.Context.from_interaction(interaction)
         await self.help_command(ctx, category=category)

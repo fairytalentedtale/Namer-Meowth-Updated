@@ -187,9 +187,44 @@ def _shiny_usage_embed() -> discord.Embed:
 # ------------------------------------------------------------------ #
 
 async def _resolve_message(
+    channel: discord.TextChannel, message_id: int, bot: Optional[commands.Bot] = None
+) -> Optional[discord.Message]:
+    """
+    Fetch a message by ID. Tries the current channel first, then falls back to
+    searching every text channel the bot can read across all its guilds.
+    Returns None if not found anywhere.
+    """
+    try:
+        return await channel.fetch_message(message_id)
+    except (discord.NotFound, discord.HTTPException):
+        pass
+
+    if bot is None:
+        return None
+
+    for guild in bot.guilds:
+        for ch in guild.text_channels:
+            if ch.id == channel.id:
+                continue  # already tried
+            perms = ch.permissions_for(guild.me)
+            if not (perms.read_messages and perms.read_message_history):
+                continue
+            try:
+                return await ch.fetch_message(message_id)
+            except (discord.NotFound, discord.HTTPException):
+                continue
+
+    return None
+
+
+async def _resolve_message_fast(
     channel: discord.TextChannel, message_id: int
 ) -> Optional[discord.Message]:
-    """Fetch a message by ID from the given channel. Returns None if not found."""
+    """
+    Fast resolve: only tries the current channel, doesn't search all guilds.
+    Used for timedifference to avoid timeout when messages are from other servers.
+    Falls back to snowflake math if message can't be fetched.
+    """
     try:
         return await channel.fetch_message(message_id)
     except (discord.NotFound, discord.HTTPException):
@@ -197,13 +232,13 @@ async def _resolve_message(
 
 
 async def _get_previous_message(
-    channel: discord.TextChannel, reference_message: discord.Message
+    reference_message: discord.Message,
 ) -> Optional[discord.Message]:
     """
-    Return the message posted immediately before `reference_message`.
-    Uses channel.history(before=) — no manual cache needed.
+    Return the message posted immediately before `reference_message`,
+    fetched from the channel the message actually lives in.
     """
-    async for msg in channel.history(before=reference_message, limit=1):
+    async for msg in reference_message.channel.history(before=reference_message, limit=1):
         return msg
     return None
 
@@ -256,6 +291,88 @@ def _build_timediff_embed(msg1: discord.Message, msg2: discord.Message) -> disco
     return embed
 
 
+DISCORD_EPOCH_MS = 1420070400000  # Jan 1, 2015 UTC
+
+
+def _snowflake_to_datetime(snowflake_id: int) -> datetime.datetime:
+    """Extract the UTC creation time encoded in a Discord snowflake ID."""
+    ms = (snowflake_id >> 22) + DISCORD_EPOCH_MS
+    return datetime.datetime.fromtimestamp(ms / 1000, tz=datetime.timezone.utc)
+
+
+def _build_timediff_embed_snowflake(id1: int, id2: int) -> discord.Embed:
+    """
+    Build a time-difference embed using only snowflake math — no message fetch needed.
+    Used when the bot cannot access the messages directly.
+    """
+    dt1 = _snowflake_to_datetime(id1)
+    dt2 = _snowflake_to_datetime(id2)
+    earlier_id, later_id = (id1, id2) if dt1 < dt2 else (id2, id1)
+    earlier_dt = _snowflake_to_datetime(earlier_id)
+    later_dt   = _snowflake_to_datetime(later_id)
+
+    delta = later_dt - earlier_dt
+    total_seconds = delta.total_seconds()
+    total_ms = int(total_seconds * 1000)
+
+    if total_seconds < 60:
+        seconds_str = f"{total_seconds:.3f}s"
+    elif total_seconds < 3600:
+        minutes = int(total_seconds // 60)
+        secs = total_seconds % 60
+        seconds_str = f"{minutes}m {secs:.3f}s  ({total_seconds:.3f}s total)"
+    else:
+        hours = int(total_seconds // 3600)
+        remaining = total_seconds % 3600
+        minutes = int(remaining // 60)
+        secs = remaining % 60
+        seconds_str = f"{hours}h {minutes}m {secs:.3f}s  ({total_seconds:.3f}s total)"
+
+    embed = discord.Embed(title="⏱️ Time Difference", color=EMBED_COLOR)
+    embed.add_field(
+        name="Earlier Message",
+        value=(
+            f"ID: `{earlier_id}`\n"
+            f"<t:{int(earlier_dt.timestamp())}:F>"
+        ),
+        inline=True,
+    )
+    embed.add_field(
+        name="Later Message",
+        value=(
+            f"ID: `{later_id}`\n"
+            f"<t:{int(later_dt.timestamp())}:F>"
+        ),
+        inline=True,
+    )
+    embed.add_field(name="\u200b", value="\u200b", inline=True)  # spacer
+    embed.add_field(name="Seconds",      value=f"`{seconds_str}`",   inline=True)
+    embed.add_field(name="Milliseconds", value=f"`{total_ms:,} ms`", inline=True)
+    embed.set_footer(text="Timestamps derived from snowflake IDs — message content not accessible.")
+    return embed
+
+
+def _build_single_message_date_embed(message_id: int) -> discord.Embed:
+    """
+    Build an embed showing just the date/time of a single message from its Snowflake ID.
+    """
+    dt = _snowflake_to_datetime(message_id)
+    
+    embed = discord.Embed(title="📅 Message Date", color=EMBED_COLOR)
+    embed.add_field(
+        name="Message ID",
+        value=f"`{message_id}`",
+        inline=False,
+    )
+    embed.add_field(
+        name="Created At",
+        value=f"<t:{int(dt.timestamp())}:F>",
+        inline=False,
+    )
+    embed.set_footer(text="Timestamp derived from snowflake ID.")
+    return embed
+
+
 # ------------------------------------------------------------------ #
 #  Pokétwo ObjectID → date helpers                                     #
 # ------------------------------------------------------------------ #
@@ -266,6 +383,118 @@ def _objectid_to_datetime(object_id: str) -> datetime.datetime:
     The first 8 hex characters encode a Unix timestamp (big-endian uint32).
     Returns a timezone-aware UTC datetime.
     """
+
+
+# ------------------------------------------------------------------ #
+#  Color utilities                                                     #
+# ------------------------------------------------------------------ #
+
+def _parse_color(color_input: str) -> Optional[tuple[int, int, int]]:
+    """
+    Parse a color from various formats:
+    - Hex: #RRGGBB or RRGGBB (with or without #)
+    - RGB: rgb(r, g, b) or r, g, b
+    - Color names: red, blue, green, etc.
+    Returns (R, G, B) tuple or None if invalid.
+    """
+    color_input = color_input.strip()
+    
+    # Try hex format
+    if color_input.startswith('#'):
+        color_input = color_input[1:]
+    if len(color_input) == 6 and all(c in '0123456789abcdefABCDEF' for c in color_input):
+        try:
+            r = int(color_input[0:2], 16)
+            g = int(color_input[2:4], 16)
+            b = int(color_input[4:6], 16)
+            return (r, g, b)
+        except ValueError:
+            pass
+    
+    # Try rgb() format
+    if color_input.lower().startswith('rgb(') and color_input.endswith(')'):
+        try:
+            rgb_str = color_input[4:-1]
+            parts = [int(x.strip()) for x in rgb_str.split(',')]
+            if len(parts) == 3 and all(0 <= x <= 255 for x in parts):
+                return tuple(parts)
+        except ValueError:
+            pass
+    
+    # Try comma-separated format
+    try:
+        parts = [int(x.strip()) for x in color_input.split(',')]
+        if len(parts) == 3 and all(0 <= x <= 255 for x in parts):
+            return tuple(parts)
+    except ValueError:
+        pass
+    
+    # Try color names
+    color_names = {
+        'red': (255, 0, 0), 'green': (0, 128, 0), 'blue': (0, 0, 255),
+        'white': (255, 255, 255), 'black': (0, 0, 0), 'yellow': (255, 255, 0),
+        'cyan': (0, 255, 255), 'magenta': (255, 0, 255), 'silver': (192, 192, 192),
+        'gray': (128, 128, 128), 'maroon': (128, 0, 0), 'olive': (128, 128, 0),
+        'lime': (0, 255, 0), 'aqua': (0, 255, 255), 'teal': (0, 128, 128),
+        'navy': (0, 0, 128), 'purple': (128, 0, 128), 'orange': (255, 165, 0),
+        'pink': (255, 192, 203), 'brown': (165, 42, 42), 'gold': (255, 215, 0),
+    }
+    normalized = color_input.lower()
+    if normalized in color_names:
+        return color_names[normalized]
+    
+    return None
+
+
+def _rgb_to_hex(r: int, g: int, b: int) -> str:
+    """Convert RGB to hex format."""
+    return f"#{r:02X}{g:02X}{b:02X}"
+
+
+def _rgb_to_hsl(r: int, g: int, b: int) -> tuple[int, int, int]:
+    """Convert RGB (0-255) to HSL (0-360, 0-100, 0-100)."""
+    r, g, b = r / 255.0, g / 255.0, b / 255.0
+    max_val = max(r, g, b)
+    min_val = min(r, g, b)
+    l = (max_val + min_val) / 2
+    
+    if max_val == min_val:
+        h = s = 0
+    else:
+        d = max_val - min_val
+        s = d / (2 - max_val - min_val) if l > 0.5 else d / (max_val + min_val)
+        
+        if max_val == r:
+            h = (g - b) / d + (6 if g < b else 0)
+        elif max_val == g:
+            h = (b - r) / d + 2
+        else:
+            h = (r - g) / d + 4
+        h /= 6
+    
+    return (round(h * 360), round(s * 100), round(l * 100))
+
+
+def _build_color_embed(hex_color: str, rgb: tuple[int, int, int]) -> discord.Embed:
+    """Build an embed showing color information."""
+    r, g, b = rgb
+    h, s, l = _rgb_to_hsl(r, g, b)
+    
+    # Convert hex to int for Discord color (without #)
+    color_int = int(hex_color[1:], 16)
+    
+    embed = discord.Embed(title="🎨 Color Converter", color=color_int)
+    embed.add_field(name="Hex", value=f"`{hex_color.upper()}`", inline=True)
+    embed.add_field(name="RGB", value=f"`rgb({r}, {g}, {b})`", inline=True)
+    embed.add_field(name="HSL", value=f"`hsl({h}, {s}%, {l}%)`", inline=True)
+    embed.add_field(name="Decimal", value=f"`{color_int}`", inline=False)
+    embed.set_thumbnail(url=f"https://singlecolorimage.com/get/{hex_color[1:]}/200x200")
+    embed.set_footer(text="Color preview shown as thumbnail")
+    
+    return embed
+
+
+def _objectid_to_datetime(object_id: str) -> datetime.datetime:
     if len(object_id) < 8:
         raise ValueError(f"ObjectID too short: {object_id!r}")
     unix_ts = int(object_id[:8], 16)
@@ -473,58 +702,51 @@ class PokeTools(commands.Cog, name="PokeTools"):
         id1: Optional[int],
         id2: Optional[int],
         reply_ref: Optional[discord.MessageReference],
-    ) -> tuple[Optional[discord.Message], Optional[discord.Message], Optional[str]]:
+    ) -> tuple[Optional[discord.Message], Optional[discord.Message], Optional[str], Optional[tuple[int, int]], Optional[int]]:
         """
         Resolve the two messages to compare.
-        Returns (msg_a, msg_b, error_string). error_string is None on success.
+        Returns (msg_a, msg_b, error_string, snowflake_ids, single_id).
+
+        - On full success: (msg_a, msg_b, None, None, None)
+        - On snowflake fallback (IDs given): (None, None, None, (id1, id2), None) or (None, None, None, None, id1)
+        - On error: (None, None, error_string, None, None)
 
         Modes:
           - reply / one id  → target message + the message before it
-          - two ids         → the two specified messages directly
+          - two ids         → use snowflake math only
+          - one id only     → use snowflake math only
         """
-        # Two explicit IDs
+        # Two explicit IDs — always use snowflake math (no fetching)
         if id1 is not None and id2 is not None:
-            msg_a = await _resolve_message(channel, id1)
-            if msg_a is None:
-                return None, None, f"❌ Could not find message with ID `{id1}` in this channel."
-            msg_b = await _resolve_message(channel, id2)
-            if msg_b is None:
-                return None, None, f"❌ Could not find message with ID `{id2}` in this channel."
-            return msg_a, msg_b, None
+            return None, None, None, (id1, id2), None
 
-        # One explicit ID → find the message before it
+        # One explicit ID — use snowflake math only
         if id1 is not None:
-            target = await _resolve_message(channel, id1)
-            if target is None:
-                return None, None, f"❌ Could not find message with ID `{id1}` in this channel."
-            prev = await _get_previous_message(channel, target)
-            if prev is None:
-                return None, None, "❌ Could not find a message before that one."
-            return target, prev, None
+            return None, None, None, None, id1
 
-        # Reply mode → use the replied-to message and the one before it
+        # Reply mode → fetch the replied-to message and the one before it (full details)
         if reply_ref is not None:
-            target = await _resolve_message(channel, reply_ref.message_id)
+            target = await _resolve_message(channel, reply_ref.message_id, self.bot)
             if target is None:
-                return None, None, "❌ Could not fetch the replied-to message."
-            prev = await _get_previous_message(channel, target)
+                return None, None, "❌ Could not fetch the replied-to message.", None, None
+            prev = await _get_previous_message(target)
             if prev is None:
-                return None, None, "❌ Could not find a message before the replied-to message."
-            return target, prev, None
+                return None, None, "❌ Could not find a message before the replied-to message.", None, None
+            return target, prev, None, None, None
 
         return None, None, (
             "❌ Please either:\n"
             "• Reply to a message with `p!td`\n"
             "• Provide one message ID: `p!td <id>`\n"
             "• Provide two message IDs: `p!td <id1> <id2>`"
-        )
+        ), None, None
 
     @app_commands.command(
         name="timedifference",
-        description="Find the time difference between two messages.",
+        description="Find the time difference between two messages or show a message date.",
     )
     @app_commands.describe(
-        message_id="A single message ID (finds the message before it), or leave blank when replying",
+        message_id="A single message ID (shows date only), or first ID for time diff",
         message_id2="Second message ID — compare directly with message_id",
     )
     async def timedifference_slash(
@@ -549,11 +771,22 @@ class PokeTools(commands.Cog, name="PokeTools"):
                 await interaction.followup.send("❌ `message_id2` must be a valid integer ID.")
                 return
 
-        msg_a, msg_b, error = await self._resolve_pair(interaction.channel, id1, id2, reply_ref=None)
+        msg_a, msg_b, error, snowflake_ids, single_id = await self._resolve_pair(interaction.channel, id1, id2, reply_ref=None)
         if error:
             await interaction.followup.send(error)
             return
 
+        # Two IDs — show time difference only
+        if snowflake_ids:
+            await interaction.followup.send(embed=_build_timediff_embed_snowflake(*snowflake_ids))
+            return
+
+        # Single ID — show just the date
+        if single_id is not None:
+            await interaction.followup.send(embed=_build_single_message_date_embed(single_id))
+            return
+
+        # Reply mode — show full details
         await interaction.followup.send(embed=_build_timediff_embed(msg_a, msg_b))
 
     @commands.command(name="timedifference", aliases=["timediff", "td"])
@@ -567,19 +800,31 @@ class PokeTools(commands.Cog, name="PokeTools"):
         Find the time difference between two messages.
 
         Usage:
-          p!td                — reply to a message; compares it with the one above it
-          p!td <id>           — compares <id> with the message above it
-          p!td <id1> <id2>    — compares the two messages directly
+          p!td                — reply to a message; shows it + message above with full details
+          p!td <id>           — shows the date of that message ID only
+          p!td <id1> <id2>    — shows time difference between the two IDs (instant, no fetching)
 
         Aliases: p!timediff, p!timedifference
         """
         async with ctx.typing():
             reply_ref = ctx.message.reference if ctx.message.reference else None
-            msg_a, msg_b, error = await self._resolve_pair(ctx.channel, id1, id2, reply_ref)
+            msg_a, msg_b, error, snowflake_ids, single_id = await self._resolve_pair(ctx.channel, id1, id2, reply_ref)
+            
             if error:
                 await ctx.send(error)
                 return
 
+            # Two IDs — show time difference only (Snowflake math, instant)
+            if snowflake_ids:
+                await ctx.send(embed=_build_timediff_embed_snowflake(*snowflake_ids))
+                return
+
+            # Single ID — show just the date
+            if single_id is not None:
+                await ctx.send(embed=_build_single_message_date_embed(single_id))
+                return
+
+            # Reply mode — show full details with author, jump link, etc.
             await ctx.send(embed=_build_timediff_embed(msg_a, msg_b))
 
     # ================================================================ #
@@ -654,7 +899,7 @@ class PokeTools(commands.Cog, name="PokeTools"):
         async with ctx.typing():
             replied_msg: Optional[discord.Message] = None
             if ctx.message.reference and ctx.message.reference.message_id:
-                replied_msg = await _resolve_message(ctx.channel, ctx.message.reference.message_id)
+                replied_msg = await _resolve_message(ctx.channel, ctx.message.reference.message_id, self.bot)
 
             oid, error = self._resolve_date_target(object_id, replied_msg)
             if error:
@@ -759,6 +1004,75 @@ class PokeTools(commands.Cog, name="PokeTools"):
                 return
 
             await ctx.send(" ".join(ids))
+
+    # ================================================================ #
+    #  Color converter                                                   #
+    # ================================================================ #
+
+    @app_commands.command(
+        name="color",
+        description="Convert and display color information in multiple formats.",
+    )
+    @app_commands.describe(
+        color_value="Color in hex (#FF0000), RGB (255,0,0), or name (red)",
+    )
+    async def color_slash(
+        self,
+        interaction: discord.Interaction,
+        color_value: str,
+    ):
+        rgb = _parse_color(color_value)
+        if rgb is None:
+            await interaction.response.send_message(
+                "❌ Invalid color format. Try:\n"
+                "• Hex: `#FF0000` or `FF0000`\n"
+                "• RGB: `255, 0, 0` or `rgb(255, 0, 0)`\n"
+                "• Name: `red`, `blue`, `green`, etc."
+            )
+            return
+
+        hex_color = _rgb_to_hex(*rgb)
+        embed = _build_color_embed(hex_color, rgb)
+        await interaction.response.send_message(embed=embed)
+
+    @commands.command(name="color", aliases=["colour", "c"])
+    async def color_prefix(self, ctx: commands.Context, *, color_value: str = None):
+        """
+        Convert and display color information.
+
+        Usage:
+          p!color #FF0000        — show color in hex format
+          p!color 255, 0, 0      — show color in RGB format
+          p!color red            — show color by name
+          p!color rgb(255,0,0)   — RGB function format
+
+        Aliases: p!colour, p!c
+
+        Supported color names: red, green, blue, yellow, cyan, magenta, white, black,
+        gray, silver, maroon, olive, lime, aqua, teal, navy, purple, orange, pink, brown, gold
+        """
+        if not color_value:
+            await ctx.send(
+                "❌ Please provide a color. Examples:\n"
+                "`p!color #FF0000`\n"
+                "`p!color 255, 0, 0`\n"
+                "`p!color red`"
+            )
+            return
+
+        rgb = _parse_color(color_value)
+        if rgb is None:
+            await ctx.send(
+                "❌ Invalid color format. Try:\n"
+                "• Hex: `#FF0000` or `FF0000`\n"
+                "• RGB: `255, 0, 0` or `rgb(255, 0, 0)`\n"
+                "• Name: `red`, `blue`, `green`, etc."
+            )
+            return
+
+        hex_color = _rgb_to_hex(*rgb)
+        embed = _build_color_embed(hex_color, rgb)
+        await ctx.send(embed=embed)
 
     # ================================================================ #
     #  Owner utilities                                                   #
